@@ -1,0 +1,76 @@
+name: Build DFW RTX Dataset
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'data_pipeline/**'
+      - '.github/workflows/build-dfw-dataset.yml'
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  build-dataset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: data_pipeline/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r data_pipeline/requirements.txt
+
+      - name: Build 2016-2025 DFW flight and weather dataset
+        run: |
+          python data_pipeline/build_dfw_rtx_dataset.py \
+            --start-year 2016 \
+            --end-year 2025 \
+            --origin DFW \
+            --station 72259003927 \
+            --output-dir rtx_dfw_data \
+            --parquet-only
+
+      - name: Show dataset summary
+        if: always()
+        run: |
+          if [ -f rtx_dfw_data/final/dataset_summary.json ]; then
+            cat rtx_dfw_data/final/dataset_summary.json
+          fi
+
+      - name: Upload model-ready dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtx-dfw-model-ready-2016-2025
+          path: |
+            rtx_dfw_data/final/rtx_dfw_flights_weather_2016_2025_model_input.parquet
+            rtx_dfw_data/final/data_dictionary.csv
+            rtx_dfw_data/final/dataset_summary.json
+            rtx_dfw_data/final/safe_feature_columns.txt
+            rtx_dfw_data/final/target_columns.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload complete joined dataset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtx-dfw-complete-2016-2025
+          path: |
+            rtx_dfw_data/final/rtx_dfw_flights_weather_2016_2025.parquet
+            rtx_dfw_data/final/dfw_weather_2016_2025.parquet
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
