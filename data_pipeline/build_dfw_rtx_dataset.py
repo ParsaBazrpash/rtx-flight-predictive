@@ -195,6 +195,13 @@ def parse_wind(series: pd.Series) -> tuple[pd.Series, pd.Series]:
 
 
 def parse_precip(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Return precipitation depth (mm) and reporting period (hours).
+
+    NOAA Global Hourly may provide several AA1-AA4 precipitation groups on the
+    same observation. Some rows have no valid precipitation group at all.
+    Avoid DataFrame.idxmin here because all-NA rows can produce an invalid
+    sentinel index in newer pandas versions.
+    """
     options = []
     for col in ("AA1", "AA2", "AA3", "AA4"):
         if col not in df.columns:
@@ -202,30 +209,42 @@ def parse_precip(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
         parts = df[col].astype("string").str.split(",", expand=True)
         if parts.shape[1] < 2:
             continue
-        hours = pd.to_numeric(parts[0], errors="coerce").replace(99, np.nan)
-        depth = pd.to_numeric(parts[1], errors="coerce").replace(9999, np.nan) / 10.0
+
+        hours = pd.to_numeric(parts[0], errors="coerce").astype("float64")
+        depth = pd.to_numeric(parts[1], errors="coerce").astype("float64")
+
+        # NOAA missing-value sentinels.
+        hours = hours.mask(hours.eq(99))
+        depth = depth.mask(depth.eq(9999)) / 10.0
         options.append((hours, depth))
 
     if not options:
-        empty = pd.Series(np.nan, index=df.index)
+        empty = pd.Series(np.nan, index=df.index, dtype="float64")
         return empty.copy(), empty.copy()
 
     h = pd.concat([x[0] for x in options], axis=1)
     d = pd.concat([x[1] for x in options], axis=1)
-    h.columns = range(h.shape[1])
-    d.columns = range(d.shape[1])
 
-    valid = h.notna() & d.notna()
-    ranked = h.where(valid)
-    chosen_col = ranked.idxmin(axis=1, skipna=True)
+    hours_arr = h.to_numpy(dtype="float64", na_value=np.nan)
+    depth_arr = d.to_numpy(dtype="float64", na_value=np.nan)
+    valid = np.isfinite(hours_arr) & np.isfinite(depth_arr)
 
-    out_h = pd.Series(np.nan, index=df.index, dtype="float64")
-    out_d = pd.Series(np.nan, index=df.index, dtype="float64")
-    for col in h.columns:
-        mask = chosen_col.eq(col)
-        out_h.loc[mask] = h.loc[mask, col]
-        out_d.loc[mask] = d.loc[mask, col]
-    return out_d, out_h
+    # Prefer the valid precipitation group with the shortest accumulation
+    # period. Rows with no valid group remain NaN.
+    score = np.where(valid, hours_arr, np.inf)
+    has_value = valid.any(axis=1)
+    best_col = score.argmin(axis=1)
+    row_idx = np.arange(len(df))
+
+    out_h = np.full(len(df), np.nan, dtype="float64")
+    out_d = np.full(len(df), np.nan, dtype="float64")
+    out_h[has_value] = hours_arr[row_idx[has_value], best_col[has_value]]
+    out_d[has_value] = depth_arr[row_idx[has_value], best_col[has_value]]
+
+    return (
+        pd.Series(out_d, index=df.index, dtype="float64"),
+        pd.Series(out_h, index=df.index, dtype="float64"),
+    )
 
 
 def download_noaa_year(year: int, station: str, raw_dir: Path) -> Path:
